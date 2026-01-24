@@ -1,0 +1,8 @@
+zstandard>=0.22.0
+python-chess>=1.999
+torch>=2.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+tqdm>=4.66.0
+pytest>=7.4.0

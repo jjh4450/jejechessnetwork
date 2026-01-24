@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# PyTorch
+models/
+*.pth
+*.pt
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+
+# Data files
+data/*.zst
+data/parquet/*.parquet
+
+# OS
+.DS_Store
+
+data/
