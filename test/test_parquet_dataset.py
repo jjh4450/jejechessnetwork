@@ -234,12 +234,16 @@ def test_dataset_iteration_with_shuffle_files(sample_parquet_files):
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
         shuffle_files=True,
-        verbose=False
+        verbose=False,
+        batch_size=10  # 테스트용 배치 크기
     )
     
-    samples = list(dataset)
+    total_samples = 0
+    for batch in dataset:
+        states, _, _, _ = batch
+        total_samples += states.shape[0]
     
-    assert len(samples) == 300, f"Expected 300 samples, got {len(samples)}"
+    assert total_samples == 300, f"Expected 300 samples, got {total_samples}"
 
 
 def test_dataset_iteration_sequential(sample_parquet_files):
@@ -247,41 +251,47 @@ def test_dataset_iteration_sequential(sample_parquet_files):
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
         shuffle_files=False,
-        verbose=False
+        verbose=False,
+        batch_size=10  # 테스트용 배치 크기
     )
     
-    samples = list(dataset)
+    total_samples = 0
+    for batch in dataset:
+        states, _, _, _ = batch
+        total_samples += states.shape[0]
     
-    assert len(samples) == 300, f"Expected 300 samples, got {len(samples)}"
+    assert total_samples == 300, f"Expected 300 samples, got {total_samples}"
 
 
 def test_dataset_sample_format(sample_parquet_files):
-    """ParquetChessDataset - 샘플 형식 확인"""
+    """ParquetChessDataset - 배치 형식 확인"""
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
         shuffle_files=False,
-        verbose=False
+        verbose=False,
+        batch_size=32  # 테스트용 배치 크기
     )
     
-    for sample in dataset:
-        state, policy, mask, value = sample
+    for batch in dataset:
+        states, policies, masks, values = batch
         
-        assert isinstance(state, torch.Tensor), "State should be a tensor"
-        assert isinstance(policy, torch.Tensor), "Policy should be a tensor"
-        assert isinstance(mask, torch.Tensor), "Mask should be a tensor"
-        assert isinstance(value, torch.Tensor), "Value should be a tensor"
+        assert isinstance(states, torch.Tensor), "States should be a tensor"
+        assert isinstance(policies, torch.Tensor), "Policies should be a tensor"
+        assert isinstance(masks, torch.Tensor), "Masks should be a tensor"
+        assert isinstance(values, torch.Tensor), "Values should be a tensor"
         
-        assert state.shape == (18, 8, 8), f"State shape mismatch: {state.shape}"
-        assert policy.shape == (), f"Policy should be scalar, got {policy.shape}"
-        assert mask.shape == (4096,), f"Mask shape mismatch: {mask.shape}"
-        assert value.shape == (), f"Value should be scalar, got {value.shape}"
+        batch_size = states.shape[0]
+        assert states.shape == (batch_size, 18, 8, 8), f"States shape mismatch: {states.shape}"
+        assert policies.shape == (batch_size,), f"Policies shape mismatch: {policies.shape}"
+        assert masks.shape == (batch_size, 4096), f"Masks shape mismatch: {masks.shape}"
+        assert values.shape == (batch_size,), f"Values shape mismatch: {values.shape}"
         
-        assert state.dtype == torch.float32, f"State dtype: {state.dtype}"
-        assert policy.dtype == torch.int64, f"Policy dtype: {policy.dtype}"
-        assert mask.dtype == torch.float32, f"Mask dtype: {mask.dtype}"
-        assert value.dtype == torch.float32, f"Value dtype: {value.dtype}"
+        assert states.dtype == torch.float32, f"States dtype: {states.dtype}"
+        assert policies.dtype == torch.int64, f"Policies dtype: {policies.dtype}"
+        assert masks.dtype == torch.float32, f"Masks dtype: {masks.dtype}"
+        assert values.dtype == torch.float32, f"Values dtype: {values.dtype}"
         
-        break  # 첫 샘플만 확인
+        break  # 첫 배치만 확인
 
 
 def test_dataset_set_epoch(sample_parquet_files):
@@ -290,16 +300,23 @@ def test_dataset_set_epoch(sample_parquet_files):
         parquet_files=sample_parquet_files,
         shuffle_files=True,
         seed=42,
-        verbose=False
+        verbose=False,
+        batch_size=10  # 테스트용 배치 크기
     )
     
     # epoch 0
     dataset.set_epoch(0)
-    samples_epoch0 = [s[1].item() for s in dataset]  # policy 값만 추출
+    samples_epoch0 = []
+    for batch in dataset:
+        _, policies, _, _ = batch
+        samples_epoch0.extend(policies.tolist())
     
     # epoch 1
     dataset.set_epoch(1)
-    samples_epoch1 = [s[1].item() for s in dataset]
+    samples_epoch1 = []
+    for batch in dataset:
+        _, policies, _, _ = batch
+        samples_epoch1.extend(policies.tolist())
     
     # 다른 epoch은 다른 순서여야 함 (파일 순서가 다르게 됨)
     assert samples_epoch0 != samples_epoch1, "Different epochs should produce different order"
@@ -312,19 +329,29 @@ def test_dataset_with_dataloader(sample_parquet_files):
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
         shuffle_files=True,
-        verbose=False
+        verbose=False,
+        batch_size=32  # Dataset이 반환할 배치 크기
     )
     
-    loader = DataLoader(dataset, batch_size=32, shuffle=False)
+    loader = DataLoader(
+        dataset, 
+        batch_size=None,  # Dataset이 이미 배치를 반환
+        collate_fn=lambda x: x[0],  # 배치가 이미 완성되어 있으므로 첫 번째 요소만 반환
+        shuffle=False
+    )
     
     total_samples = 0
     for batch in loader:
         states, policies, masks, values = batch
         
-        assert states.shape[0] <= 32, "Batch size should be <= 32"
-        assert states.shape[1:] == (18, 8, 8), f"State shape: {states.shape}"
+        batch_size = states.shape[0]
+        assert batch_size <= 32, f"Batch size should be <= 32, got {batch_size}"
+        assert states.shape == (batch_size, 18, 8, 8), f"States shape: {states.shape}"
+        assert policies.shape == (batch_size,), f"Policies shape: {policies.shape}"
+        assert masks.shape == (batch_size, 4096), f"Masks shape: {masks.shape}"
+        assert values.shape == (batch_size,), f"Values shape: {values.shape}"
         
-        total_samples += states.shape[0]
+        total_samples += batch_size
     
     assert total_samples == 300, f"Expected 300 samples, got {total_samples}"
 
@@ -360,7 +387,8 @@ def test_dataset_deterministic_with_seed(sample_parquet_files):
         parquet_files=sample_parquet_files,
         shuffle_files=True,
         seed=42,
-        verbose=False
+        verbose=False,
+        batch_size=10  # 테스트용 배치 크기
     )
     dataset1.set_epoch(0)
     
@@ -368,11 +396,19 @@ def test_dataset_deterministic_with_seed(sample_parquet_files):
         parquet_files=sample_parquet_files,
         shuffle_files=True,
         seed=42,
-        verbose=False
+        verbose=False,
+        batch_size=10  # 테스트용 배치 크기
     )
     dataset2.set_epoch(0)
     
-    samples1 = [s[1].item() for s in dataset1]
-    samples2 = [s[1].item() for s in dataset2]
+    samples1 = []
+    for batch in dataset1:
+        _, policies, _, _ = batch
+        samples1.extend(policies.tolist())
+    
+    samples2 = []
+    for batch in dataset2:
+        _, policies, _, _ = batch
+        samples2.extend(policies.tolist())
     
     assert samples1 == samples2, "Same seed and epoch should produce same result"
