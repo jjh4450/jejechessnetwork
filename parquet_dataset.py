@@ -231,19 +231,20 @@ class ParquetChessDataset(IterableDataset):
         파일에서 배치 단위로 샘플 읽기 (최적화 버전)
         
         pyarrow에서 큰 청크로 읽고 슬라이싱으로 batch_size 단위로 yield합니다.
-        - to_pylist() 호출 최소화 (주요 병목)
+        - .values.to_numpy()로 zero-copy 변환 (to_pylist 병목 제거)
         - 파일 경계에서 마지막 배치가 작을 수 있음 (학습에 영향 없음)
         """
         parquet_file = pq.ParquetFile(file_path)
         
-        # 큰 청크로 읽어서 to_pylist() 호출 횟수 최소화
         for batch in parquet_file.iter_batches(batch_size=self.chunk_size):
             n = batch.num_rows
             
-            # numpy 배열로 변환 (to_pylist는 한 번만 호출)
-            states = np.array(batch.column('state').to_pylist(), dtype=np.float32).reshape(n, 18, 8, 8)
+            # .values.to_numpy()로 직접 변환 (to_pylist 병목 제거)
+            # state: flatten된 (n*1152,) -> (n, 18, 8, 8)
+            states = batch.column('state').values.to_numpy().astype(np.float32).reshape(n, 18, 8, 8)
             policies = batch.column('policy').to_numpy().astype(np.int64)
-            masks = np.array(batch.column('mask').to_pylist(), dtype=np.float32)
+            # mask: flatten된 (n*4096,) -> (n, 4096)
+            masks = batch.column('mask').values.to_numpy().astype(np.float32).reshape(n, 4096)
             values = batch.column('value').to_numpy().astype(np.float32)
             
             # batch_size 단위로 슬라이싱하여 yield
