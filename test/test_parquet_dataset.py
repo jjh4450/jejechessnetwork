@@ -146,11 +146,13 @@ def test_split_files_by_ratio_default(sample_parquet_files):
     """split_files_by_ratio - 기본 분할 (9:1)"""
     lengths = [100, 100, 100]  # 총 300개
     
-    train_files, val_files, train_samples, val_samples = split_files_by_ratio(
+    train_files, val_files, train_lengths, val_lengths, train_samples, val_samples = split_files_by_ratio(
         sample_parquet_files, lengths, train_ratio=0.9
     )
     
     assert len(train_files) + len(val_files) == 3, "All files should be assigned"
+    assert len(train_lengths) == len(train_files), "train_lengths should match train_files"
+    assert len(val_lengths) == len(val_files), "val_lengths should match val_files"
     assert train_samples + val_samples == 300, "All samples should be assigned"
 
 
@@ -158,13 +160,15 @@ def test_split_files_by_ratio_balanced(sample_parquet_files):
     """split_files_by_ratio - 50:50 분할"""
     lengths = [100, 100, 100]
     
-    train_files, val_files, train_samples, val_samples = split_files_by_ratio(
+    train_files, val_files, train_lengths, val_lengths, train_samples, val_samples = split_files_by_ratio(
         sample_parquet_files, lengths, train_ratio=0.5
     )
     
     # 파일 단위 분할이므로 정확히 50%가 아닐 수 있음
     assert len(train_files) >= 1, "Should have at least 1 train file"
     assert len(val_files) >= 1, "Should have at least 1 val file"
+    assert len(train_lengths) == len(train_files), "train_lengths should match train_files"
+    assert len(val_lengths) == len(val_files), "val_lengths should match val_files"
 
 
 def test_split_files_by_ratio_shuffle(sample_parquet_files):
@@ -172,10 +176,10 @@ def test_split_files_by_ratio_shuffle(sample_parquet_files):
     lengths = [100, 100, 100]
     
     # 같은 시드로 두 번 호출
-    train1, val1, _, _ = split_files_by_ratio(
+    train1, val1, _, _, _, _ = split_files_by_ratio(
         sample_parquet_files, lengths, shuffle=True, seed=42
     )
-    train2, val2, _, _ = split_files_by_ratio(
+    train2, val2, _, _, _, _ = split_files_by_ratio(
         sample_parquet_files, lengths, shuffle=True, seed=42
     )
     
@@ -189,11 +193,12 @@ def test_split_files_by_ratio_no_empty_val(sample_parquet_files):
     lengths = [100, 100, 100]
     
     # train_ratio=1.0으로 해도 val이 최소 1개 있어야 함
-    train_files, val_files, _, _ = split_files_by_ratio(
+    train_files, val_files, train_lengths, val_lengths, _, _ = split_files_by_ratio(
         sample_parquet_files, lengths, train_ratio=0.99
     )
     
     assert len(val_files) >= 1, "Val should have at least 1 file"
+    assert len(val_lengths) >= 1, "val_lengths should have at least 1 element"
 
 
 def test_split_files_by_ratio_length_mismatch(sample_parquet_files):
@@ -216,8 +221,7 @@ def test_dataset_creation(sample_parquet_files):
     """ParquetChessDataset - 생성 확인"""
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=True,
-        buffer_size=50,
+        shuffle_files=True,
         verbose=False
     )
     
@@ -225,12 +229,11 @@ def test_dataset_creation(sample_parquet_files):
     assert len(dataset.parquet_files) == 3, f"Expected 3 files, got {len(dataset.parquet_files)}"
 
 
-def test_dataset_iteration_shuffle(sample_parquet_files):
-    """ParquetChessDataset - 셔플 모드 반복 확인"""
+def test_dataset_iteration_with_shuffle_files(sample_parquet_files):
+    """ParquetChessDataset - 파일 셔플 모드 반복 확인"""
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=True,
-        buffer_size=50,
+        shuffle_files=True,
         verbose=False
     )
     
@@ -243,7 +246,7 @@ def test_dataset_iteration_sequential(sample_parquet_files):
     """ParquetChessDataset - 순차 모드 반복 확인"""
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=False,
+        shuffle_files=False,
         verbose=False
     )
     
@@ -256,7 +259,7 @@ def test_dataset_sample_format(sample_parquet_files):
     """ParquetChessDataset - 샘플 형식 확인"""
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=False,
+        shuffle_files=False,
         verbose=False
     )
     
@@ -282,11 +285,10 @@ def test_dataset_sample_format(sample_parquet_files):
 
 
 def test_dataset_set_epoch(sample_parquet_files):
-    """ParquetChessDataset - set_epoch 동작 확인"""
+    """ParquetChessDataset - set_epoch 동작 확인 (파일 순서 셔플)"""
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=True,
-        buffer_size=50,
+        shuffle_files=True,
         seed=42,
         verbose=False
     )
@@ -299,7 +301,7 @@ def test_dataset_set_epoch(sample_parquet_files):
     dataset.set_epoch(1)
     samples_epoch1 = [s[1].item() for s in dataset]
     
-    # 다른 epoch은 다른 순서여야 함 (셔플이 다르게 됨)
+    # 다른 epoch은 다른 순서여야 함 (파일 순서가 다르게 됨)
     assert samples_epoch0 != samples_epoch1, "Different epochs should produce different order"
 
 
@@ -309,8 +311,7 @@ def test_dataset_with_dataloader(sample_parquet_files):
     
     dataset = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=True,
-        buffer_size=50,
+        shuffle_files=True,
         verbose=False
     )
     
@@ -334,16 +335,22 @@ def test_dataset_empty_files():
         ParquetChessDataset(parquet_files=[], verbose=False)
 
 
-def test_dataset_shuffle_false_no_shuffle_files(sample_parquet_files):
-    """ParquetChessDataset - shuffle=False일 때 shuffle_files도 False"""
-    dataset = ParquetChessDataset(
+def test_dataset_shuffle_files_flag(sample_parquet_files):
+    """ParquetChessDataset - shuffle_files 플래그 확인"""
+    dataset_shuffle = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=False,
-        shuffle_files=True,  # 이 옵션은 무시되어야 함
+        shuffle_files=True,
         verbose=False
     )
     
-    assert dataset.shuffle_files == False, "shuffle_files should be False when shuffle=False"
+    dataset_no_shuffle = ParquetChessDataset(
+        parquet_files=sample_parquet_files,
+        shuffle_files=False,
+        verbose=False
+    )
+    
+    assert dataset_shuffle.shuffle_files == True, "shuffle_files should be True"
+    assert dataset_no_shuffle.shuffle_files == False, "shuffle_files should be False"
 
 
 def test_dataset_deterministic_with_seed(sample_parquet_files):
@@ -351,8 +358,7 @@ def test_dataset_deterministic_with_seed(sample_parquet_files):
     # 같은 시드, 같은 epoch
     dataset1 = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=True,
-        buffer_size=50,
+        shuffle_files=True,
         seed=42,
         verbose=False
     )
@@ -360,8 +366,7 @@ def test_dataset_deterministic_with_seed(sample_parquet_files):
     
     dataset2 = ParquetChessDataset(
         parquet_files=sample_parquet_files,
-        shuffle=True,
-        buffer_size=50,
+        shuffle_files=True,
         seed=42,
         verbose=False
     )
