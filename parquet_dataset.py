@@ -1,31 +1,34 @@
 """
 Parquet 파일에서 체스 데이터를 로드하는 PyTorch Dataset 클래스
+
+v2: pyarrow 배치 스트리밍으로 재작성 (pandas 제거, 성능 대폭 향상)
 """
 
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 from pathlib import Path
-import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import pyarrow.parquet as pq
+import pyarrow as pa
 from typing import List, Tuple, Optional, Iterator
 import random
 
-def load_sample_from_parquet(df_row):
+
+def load_sample_from_parquet(row_dict):
     """
-    Parquet 파일의 한 행을 원래 형태로 복원
+    Parquet 파일의 한 행(dict)을 원래 형태로 복원
     
     Args:
-        df_row: pandas DataFrame의 한 행
+        row_dict: dict 형태의 한 행 {'state': [...], 'policy': int, ...}
         
     Returns:
         (state, policy, mask, value) 튜플
     """
-    state = np.array(df_row['state'], dtype=np.float32).reshape(18, 8, 8)
-    policy = int(df_row['policy'])
-    mask = np.array(df_row['mask'], dtype=np.float32)
-    value = float(df_row['value'])
+    state = np.array(row_dict['state'], dtype=np.float32).reshape(18, 8, 8)
+    policy = int(row_dict['policy'])
+    mask = np.array(row_dict['mask'], dtype=np.float32)
+    value = float(row_dict['value'])
     
     return state, policy, mask, value
 
@@ -215,22 +218,42 @@ class ParquetChessDataset(IterableDataset):
         return file_indices
     
     def _load_samples_from_file(self, file_path: Path) -> Iterator[Tuple]:
-        """파일에서 샘플을 순차적으로 읽기"""
-        df = pd.read_parquet(file_path, engine='pyarrow')
+        """
+        파일에서 샘플을 pyarrow 배치 스트리밍으로 읽기
         
-        for idx in range(len(df)):
-            row = df.iloc[idx]
-            state = np.array(row['state'], dtype=np.float32).reshape(18, 8, 8)
-            policy = int(row['policy'])
-            mask = np.array(row['mask'], dtype=np.float32)
-            value = float(row['value'])
+        pandas 대신 pyarrow iter_batches를 사용해 성능 대폭 향상:
+        - 메모리 효율: 전체 파일을 한 번에 로드하지 않음
+        - CPU 효율: 컬럼 단위 벡터 연산으로 파이썬 루프 오버헤드 최소화
+        """
+        parquet_file = pq.ParquetFile(file_path)
+        
+        # 배치 단위로 읽기 (기본 1024행, 파일 크기에 따라 조정 가능)
+        for batch in parquet_file.iter_batches(batch_size=2048):
+            # pyarrow 배열을 numpy로 한 번에 변환
+            batch_size = batch.num_rows
             
-            yield (
-                torch.from_numpy(state).float(),
-                torch.tensor(policy, dtype=torch.long),
-                torch.from_numpy(mask).float(),
-                torch.tensor(value, dtype=torch.float32),
-            )
+            # state: list of lists → numpy 배열로 벡터 변환
+            states_list = batch.column('state').to_pylist()
+            states = np.array(states_list, dtype=np.float32).reshape(batch_size, 18, 8, 8)
+            
+            # policy: 스칼라 컬럼
+            policies = batch.column('policy').to_numpy().astype(np.int64)
+            
+            # mask: list of lists → numpy 배열
+            masks_list = batch.column('mask').to_pylist()
+            masks = np.array(masks_list, dtype=np.float32)
+            
+            # value: 스칼라 컬럼
+            values = batch.column('value').to_numpy().astype(np.float32)
+            
+            # 배치 내 각 샘플을 yield (torch 변환은 여기서)
+            for i in range(batch_size):
+                yield (
+                    torch.from_numpy(states[i].copy()),
+                    torch.tensor(policies[i], dtype=torch.long),
+                    torch.from_numpy(masks[i].copy()),
+                    torch.tensor(values[i], dtype=torch.float32),
+                )
     
     def _iter_with_shuffle(self, file_indices: List[int]) -> Iterator[Tuple]:
         """Shuffle Buffer를 사용한 데이터 스트리밍"""

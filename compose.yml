@@ -1,0 +1,35 @@
+services:
+  chess-train:
+    gpus: all
+    build:
+      context: .
+    container_name: chess-cnn-cuda
+    image: chess-cnn-cuda:latest
+    working_dir: /workspace
+    command: >
+      bash -lc "jupyter lab
+      --ip=0.0.0.0
+      --port=8888
+      --no-browser
+      --allow-root"
+    environment:
+      - JUPYTER_ALLOW_ROOT=true
+      - NO_JUPYTER_TOKEN=true
+    ports:
+      - "${JPORT:-8888}:8888"   # Jupyter Lab
+      - "6006:6006"             # TensorBoard
+    volumes:
+      - ./:/workspace:rw
+    ipc: host
+    shm_size: "16g"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8888/api/status >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
