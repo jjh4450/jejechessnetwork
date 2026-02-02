@@ -21,7 +21,7 @@ services:
     volumes:
       - ./:/workspace:rw
     ipc: host
-    shm_size: "16g"
+    # shm_size: "16g"
     ulimits:
       memlock: -1
       stack: 67108864

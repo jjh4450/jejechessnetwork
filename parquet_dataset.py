@@ -155,7 +155,8 @@ class ParquetChessDataset(IterableDataset):
         shuffle_files: bool = True,
         seed: int = 42,
         verbose: bool = True,
-        batch_size: int = 512
+        batch_size: int = 512,
+        chunk_size: int = 16384
     ):
         """
         Args:
@@ -167,6 +168,7 @@ class ParquetChessDataset(IterableDataset):
             seed: 랜덤 시드
             verbose: 진행 상황 출력 여부
             batch_size: 배치 크기 (기본 512). Dataset이 이 크기의 배치를 직접 반환합니다.
+            chunk_size: Parquet 파일 읽기 청크 크기 (기본 16384). 클수록 I/O 효율 향상, 메모리 사용 증가.
         """
         super().__init__()
         self.parquet_files = [Path(f) for f in parquet_files]
@@ -175,6 +177,7 @@ class ParquetChessDataset(IterableDataset):
         self.verbose = verbose
         self.epoch = 0
         self.batch_size = batch_size
+        self.chunk_size = chunk_size
         
         if not self.parquet_files:
             raise ValueError("파일 리스트가 비어있습니다.")
@@ -198,7 +201,7 @@ class ParquetChessDataset(IterableDataset):
         if verbose:
             print(f"총 샘플 수: {self.estimated_length:,}")
             mode_str = "파일 순서 셔플" if shuffle_files else "순차 읽기"
-            print(f"모드: {mode_str}, 배치 크기: {batch_size}")
+            print(f"모드: {mode_str}, 배치 크기: {batch_size}, 청크 크기: {chunk_size}")
     
     def set_epoch(self, epoch: int):
         """에폭 설정 (파일 순서 셔플에 사용)"""
@@ -234,7 +237,7 @@ class ParquetChessDataset(IterableDataset):
         parquet_file = pq.ParquetFile(file_path)
         
         # 큰 청크로 읽어서 to_pylist() 호출 횟수 최소화
-        for batch in parquet_file.iter_batches(batch_size=8192):
+        for batch in parquet_file.iter_batches(batch_size=self.chunk_size):
             n = batch.num_rows
             
             # numpy 배열로 변환 (to_pylist는 한 번만 호출)
