@@ -11,6 +11,50 @@ import chess.pgn
 import numpy as np
 from typing import List, Tuple, Optional
 
+# Numba JIT 컴파일 (선택적, 없으면 순수 Python 사용)
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # Numba가 없으면 일반 함수로 대체
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+
+# =============================================================================
+# Numba 최적화된 피스 채널 채우기 함수
+# =============================================================================
+@njit(cache=True)
+def _fill_piece_channels_numba(tensor: np.ndarray, piece_map: np.ndarray) -> np.ndarray:
+    """
+    Numba로 최적화된 피스 채널 채우기
+    
+    Args:
+        tensor: (18, 8, 8) 텐서 (수정됨)
+        piece_map: (64, 2) 배열 [piece_type (0=없음, 1-6=피스), color (0=검정, 1=백)]
+    
+    Returns:
+        수정된 tensor
+    """
+    for square in range(64):
+        piece_type = piece_map[square, 0]
+        piece_color = piece_map[square, 1]
+        
+        if piece_type > 0:
+            row = 7 - (square // 8)
+            col = square % 8
+            idx = piece_type - 1  # 1-6 -> 0-5
+            
+            if piece_color == 1:  # WHITE
+                tensor[idx, row, col] = 1.0
+            else:  # BLACK
+                tensor[idx + 6, row, col] = 1.0
+    
+    return tensor
+
 
 # 액션 공간: from-square × to-square = 64 × 64 = 4096
 ACTION_SPACE_SIZE = 64 * 64
@@ -75,27 +119,17 @@ def board_to_tensor(board: chess.Board) -> np.ndarray:
     """
     tensor = np.zeros((18, 8, 8), dtype=np.float32)
     
-    # Piece channels (0-11) - 딕셔너리로 O(1) 조회 (최적화)
-    piece_to_idx = {
-        chess.PAWN: 0,
-        chess.KNIGHT: 1,
-        chess.BISHOP: 2,
-        chess.ROOK: 3,
-        chess.QUEEN: 4,
-        chess.KING: 5
-    }
-    
+    # Piece channels (0-11) - Numba 최적화 사용
+    # 피스 정보를 numpy 배열로 추출 (Numba에서 사용 가능하도록)
+    piece_map = np.zeros((64, 2), dtype=np.int32)
     for square in chess.SQUARES:
-        row = 7 - (square // 8)  # 체스 보드는 아래에서 위로 (0=rank8, 7=rank1)
-        col = square % 8
-        
         piece = board.piece_at(square)
         if piece:
-            piece_type_idx = piece_to_idx[piece.piece_type]  # O(1) 조회
-            if piece.color == chess.WHITE:
-                tensor[piece_type_idx, row, col] = 1.0
-            else:
-                tensor[piece_type_idx + 6, row, col] = 1.0
+            piece_map[square, 0] = piece.piece_type  # 1-6
+            piece_map[square, 1] = 1 if piece.color == chess.WHITE else 0
+    
+    # Numba로 최적화된 피스 채널 채우기
+    _fill_piece_channels_numba(tensor, piece_map)
     
     # Side to move (12)
     tensor[12, :, :] = 1.0 if board.turn == chess.WHITE else 0.0
