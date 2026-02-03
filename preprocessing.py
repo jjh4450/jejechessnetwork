@@ -120,13 +120,11 @@ def board_to_tensor(board: chess.Board) -> np.ndarray:
     tensor = np.zeros((18, 8, 8), dtype=np.float32)
     
     # Piece channels (0-11) - Numba 최적화 사용
-    # 피스 정보를 numpy 배열로 추출 (Numba에서 사용 가능하도록)
+    # 피스 정보를 numpy 배열로 추출 (board.piece_map() 사용으로 효율성 향상)
     piece_map = np.zeros((64, 2), dtype=np.int32)
-    for square in chess.SQUARES:
-        piece = board.piece_at(square)
-        if piece:
-            piece_map[square, 0] = piece.piece_type  # 1-6
-            piece_map[square, 1] = 1 if piece.color == chess.WHITE else 0
+    for square, piece in board.piece_map().items():
+        piece_map[square, 0] = piece.piece_type  # 1-6
+        piece_map[square, 1] = 1 if piece.color == chess.WHITE else 0
     
     # Numba로 최적화된 피스 채널 채우기
     _fill_piece_channels_numba(tensor, piece_map)
