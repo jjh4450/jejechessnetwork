@@ -7,7 +7,8 @@ services:
     image: chess-cnn-cuda:latest
     working_dir: /workspace
     command: >
-      bash -lc "jupyter lab
+      bash -lc "tensorboard --logdir=/workspace/models/tensorboard --bind_all --port=6006 &
+      jupyter lab
       --ip=0.0.0.0
       --port=8888
       --no-browser

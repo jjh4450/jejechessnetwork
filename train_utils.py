@@ -7,6 +7,9 @@ validate: 검증 (확장된 메트릭 포함)
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
+from pathlib import Path
 
 
 def compute_masked_entropy(policy_logits, mask, device):
@@ -587,7 +590,7 @@ def select_action(policy_logits, mask, temperature=1.0):
     return action, log_prob, probs
 
 
-def play_single_game(model, device, temperature=1.0, max_moves=200):
+def play_single_game(model, device, temperature=1.0, max_moves=None):
     """
     단일 Self-play 게임을 진행합니다.
     
@@ -595,7 +598,7 @@ def play_single_game(model, device, temperature=1.0, max_moves=200):
         model: ChessCNN 모델
         device: 연산 장치
         temperature: 탐색 온도
-        max_moves: 최대 수
+        max_moves: 최대 수 (None이면 체스 규칙에 따른 종료만 사용)
     
     Returns:
         trajectory: 게임 trajectory
@@ -609,9 +612,14 @@ def play_single_game(model, device, temperature=1.0, max_moves=200):
     
     model.eval()
     
-    for move_num in range(max_moves):
-        # 게임 종료 체크
+    move_num = 0
+    while True:
+        # 게임 종료 체크 (체스 규칙: 체크메이트, 스테일메이트, 50수 규칙, 기물 부족)
         if fc.is_game_over(state):
+            break
+        
+        # max_moves 제한 체크 (설정된 경우에만)
+        if max_moves is not None and move_num >= max_moves:
             break
         
         # 상태 텐서 변환
@@ -645,6 +653,7 @@ def play_single_game(model, device, temperature=1.0, max_moves=200):
         
         # 수 실행
         fc.make_move(state, action)
+        move_num += 1
     
     # 결과 계산
     result_val = fc.get_result(state)
@@ -658,7 +667,7 @@ def play_single_game(model, device, temperature=1.0, max_moves=200):
     return trajectory, result, len(trajectory)
 
 
-def play_games_batch(model, device, num_games, temperature=1.0, num_envs=1, max_moves=200):
+def play_games_batch(model, device, num_games, temperature=1.0, num_envs=1, max_moves=None):
     """
     여러 게임을 Self-play로 진행합니다.
     
@@ -668,7 +677,7 @@ def play_games_batch(model, device, num_games, temperature=1.0, num_envs=1, max_
         num_games: 총 게임 수
         temperature: 탐색 온도
         num_envs: 동시 진행 게임 수 (배치 크기)
-        max_moves: 게임당 최대 수
+        max_moves: 게임당 최대 수 (None이면 체스 규칙에 따른 종료만 사용)
     
     Returns:
         all_trajectories: 모든 게임의 trajectory 리스트
@@ -714,10 +723,15 @@ def play_games_batch(model, device, num_games, temperature=1.0, num_envs=1, max_
             trajectories = [[] for _ in range(batch_size)]
             active = [True] * batch_size
             
-            for move_num in range(max_moves):
+            move_num = 0
+            while True:
                 # 활성 게임 확인
                 active_indices = [i for i, a in enumerate(active) if a]
                 if not active_indices:
+                    break
+                
+                # max_moves 제한 체크 (설정된 경우에만)
+                if max_moves is not None and move_num >= max_moves:
                     break
                 
                 # 배치 텐서 준비
@@ -767,9 +781,11 @@ def play_games_batch(model, device, num_games, temperature=1.0, num_envs=1, max_
                     # 수 실행
                     fc.make_move(states[game_idx], action)
                     
-                    # 게임 종료 체크
+                    # 게임 종료 체크 (체스 규칙: 체크메이트, 스테일메이트, 50수 규칙, 기물 부족)
                     if fc.is_game_over(states[game_idx]):
                         active[game_idx] = False
+                
+                move_num += 1
             
             # 결과 수집
             for i in range(batch_size):
@@ -828,10 +844,8 @@ def evaluate_vs_opponent(current_model, opponent_model, device, num_games=10, te
         
         state = fc.create_initial_state()
         
-        for move_num in range(200):
-            if fc.is_game_over(state):
-                break
-            
+        # 체스 규칙에 따른 종료까지 진행
+        while not fc.is_game_over(state):
             # 현재 턴 모델 결정
             is_white_turn = (fc.get_turn(state) == fc.WHITE)
             if is_white_turn == current_is_white:
@@ -897,3 +911,176 @@ def check_weight_diff(model1, model2):
         total_diff += diff
     
     return total_diff
+
+
+def create_tensorboard_writer(run_type: str, base_dir: str = "models/tensorboard") -> SummaryWriter:
+    """
+    타임스탬프 기반 TensorBoard SummaryWriter 생성
+    
+    Args:
+        run_type: 실행 타입 (예: "cnn", "rl")
+        base_dir: 기본 로그 디렉토리
+    
+    Returns:
+        SummaryWriter 인스턴스
+    """
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_dir = Path(base_dir) / f"{run_type}_{timestamp}"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return SummaryWriter(log_dir=str(log_dir))
+
+
+# =============================================================================
+# AlphaZero 스타일 MCTS 기반 강화학습 함수
+# =============================================================================
+
+def compute_alphazero_loss(model, ref_model, trajectories, results, device,
+                           value_loss_weight=1.0, entropy_bonus=0.01, kl_penalty=0.1):
+    """
+    AlphaZero 스타일 손실을 계산합니다.
+    
+    Policy Loss: CrossEntropy(π_network, π_mcts)
+    - MCTS 방문 횟수 분포를 정답으로 사용
+    
+    Value Loss: MSE(V_network, z)
+    - 게임 결과를 타겟으로 사용
+    
+    Args:
+        model: 학습 중인 ChessCNN 모델
+        ref_model: Reference 모델 (Pre-trained, 고정) - KL 페널티용
+        trajectories: 게임 trajectory 리스트 (MCTS 확률 포함)
+        results: 각 게임의 결과 (1.0=백승, -1.0=흑승, 0.0=무승부)
+        device: 연산 장치
+        value_loss_weight: Value Loss 가중치 (기본값: 1.0)
+        entropy_bonus: 엔트로피 보너스 (기본값: 0.01)
+        kl_penalty: KL Divergence 패널티 (기본값: 0.1)
+    
+    Returns:
+        total_loss: 전체 손실
+        policy_loss: 정책 손실
+        value_loss: 가치 손실
+        entropy: 평균 엔트로피
+        kl_div: 평균 KL Divergence
+    """
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
+    total_entropy = 0.0
+    total_kl_div = 0.0
+    num_steps = 0
+    
+    for game_idx, trajectory in enumerate(trajectories):
+        game_result = results[game_idx]
+        
+        for step in trajectory:
+            state = step['state'].unsqueeze(0).to(device)
+            mask = step['mask'].unsqueeze(0).to(device)
+            mcts_probs = step['mcts_probs'].unsqueeze(0).to(device)  # MCTS 타겟
+            turn = step['turn']  # True=백, False=흑
+            
+            # 타겟 가치: 해당 턴 플레이어 관점
+            if turn:  # 백 차례
+                target_value = game_result
+            else:  # 흑 차례
+                target_value = -game_result
+            
+            # 현재 모델 추론
+            policy_logits, value_pred = model(state, mask)
+            
+            # Reference 모델 추론 (고정)
+            with torch.no_grad():
+                ref_policy_logits, _ = ref_model(state, mask)
+            
+            # Policy Loss: CrossEntropy with MCTS target
+            # -sum(π_mcts * log(π_network))
+            log_probs = get_masked_log_probs(policy_logits, mask)
+            policy_loss = -(mcts_probs * log_probs).sum(dim=-1).mean()
+            
+            # Value Loss: MSE
+            target_tensor = torch.tensor([target_value], device=device, dtype=torch.float32)
+            value_loss = F.mse_loss(value_pred.squeeze(), target_tensor.squeeze())
+            
+            # Entropy Bonus
+            entropy = compute_masked_entropy(policy_logits, mask, device)
+            
+            # KL Divergence (Reference 모델과의 거리)
+            kl_div = compute_kl_divergence(ref_policy_logits, policy_logits, mask)
+            
+            total_policy_loss += policy_loss
+            total_value_loss += value_loss
+            total_entropy += entropy.mean()
+            total_kl_div += kl_div.mean()
+            num_steps += 1
+    
+    if num_steps == 0:
+        zero = torch.tensor(0.0, device=device)
+        return zero, zero, zero, zero, zero
+    
+    # 평균 계산
+    avg_policy_loss = total_policy_loss / num_steps
+    avg_value_loss = total_value_loss / num_steps
+    avg_entropy = total_entropy / num_steps
+    avg_kl_div = total_kl_div / num_steps
+    
+    # 전체 손실: Policy + c1*Value - c2*Entropy + β*KL
+    total_loss = (avg_policy_loss + 
+                  value_loss_weight * avg_value_loss - 
+                  entropy_bonus * avg_entropy + 
+                  kl_penalty * avg_kl_div)
+    
+    return total_loss, avg_policy_loss, avg_value_loss, avg_entropy, avg_kl_div
+
+
+def train_step_mcts(model, ref_model, optimizer, trajectories, results, device,
+                    value_loss_weight=1.0, entropy_bonus=0.01, kl_penalty=0.1,
+                    max_grad_norm=1.0, scaler=None, use_amp=False):
+    """
+    한 번의 AlphaZero 스타일 학습 스텝을 수행합니다.
+    
+    MCTS 방문 횟수 분포를 정책 타겟으로 사용합니다.
+    
+    Args:
+        model: 학습 중인 ChessCNN 모델
+        ref_model: Reference 모델 (Pre-trained, 고정)
+        optimizer: 옵티마이저
+        trajectories: 게임 trajectory 리스트 (MCTS 확률 포함)
+        results: 각 게임의 결과
+        device: 연산 장치
+        value_loss_weight: Value Loss 가중치
+        entropy_bonus: 엔트로피 보너스
+        kl_penalty: KL Divergence 패널티
+        max_grad_norm: Gradient Clipping 임계값
+        scaler: AMP용 GradScaler (선택사항)
+        use_amp: AMP 사용 여부
+    
+    Returns:
+        dict: 학습 메트릭
+    """
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    
+    # AMP 사용 시
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        total_loss, policy_loss, value_loss, entropy, kl_div = compute_alphazero_loss(
+            model, ref_model, trajectories, results, device,
+            value_loss_weight, entropy_bonus, kl_penalty
+        )
+    
+    # Backward
+    if scaler is not None:
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        optimizer.step()
+    
+    return {
+        'total_loss': total_loss.item(),
+        'policy_loss': policy_loss.item() if hasattr(policy_loss, 'item') else policy_loss,
+        'value_loss': value_loss.item() if hasattr(value_loss, 'item') else value_loss,
+        'entropy': entropy.item() if hasattr(entropy, 'item') else entropy,
+        'kl_div': kl_div.item() if hasattr(kl_div, 'item') else kl_div,
+    }
